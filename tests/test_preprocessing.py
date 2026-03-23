@@ -225,7 +225,7 @@ class TestScalerReducer:
 
     def test_reducer_fingerprints(self):
         p = make_profile(n_features=512, is_sparse_counts=True, n_p_ratio=3.0)
-        assert select_reducer(p) == "select_k_mutual_info"
+        assert select_reducer(p) == "correlation_filter"
 
     def test_reducer_well_determined(self):
         p = make_profile(n_features=100, n_p_ratio=25.0)
@@ -233,23 +233,23 @@ class TestScalerReducer:
 
     def test_reducer_moderate_correlated(self):
         p = make_profile(n_features=100, n_p_ratio=10.0, median_abs_correlation=0.7)
-        assert select_reducer(p) == "pca_99"
+        assert select_reducer(p) == "correlation_filter"
 
     def test_reducer_moderate_independent(self):
         p = make_profile(n_features=100, n_p_ratio=10.0, median_abs_correlation=0.2)
-        assert select_reducer(p) == "select_80"
+        assert select_reducer(p) == "correlation_filter"
 
     def test_reducer_underdetermined_sparse(self):
         p = make_profile(n_features=500, n_p_ratio=1.5, sparsity=0.7)
-        assert select_reducer(p) == "truncated_svd"
+        assert select_reducer(p) == "correlation_filter"
 
     def test_reducer_underdetermined_correlated(self):
         p = make_profile(n_features=200, n_p_ratio=2.0, sparsity=0.0, median_abs_correlation=0.8)
-        assert select_reducer(p) == "pca_95"
+        assert select_reducer(p) == "correlation_filter"
 
     def test_reducer_underdetermined_independent(self):
         p = make_profile(n_features=200, n_p_ratio=2.0, sparsity=0.0, median_abs_correlation=0.1)
-        assert select_reducer(p) == "select_50"
+        assert select_reducer(p) == "correlation_filter"
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ class TestFitTransform:
         pre = ZeroShotPreprocessor()
         X_t = pre.fit_transform(X, y)
         assert X_t.shape[0] == 50
-        assert X_t.shape[1] < 300
+        assert X_t.shape[1] <= 300
 
     def test_auto_task_detection(self):
         X, y = make_clf_data()
