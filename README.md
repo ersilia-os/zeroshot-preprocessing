@@ -26,6 +26,7 @@ X_train_t = pre.fit_transform(X_train, y_train)
 
 print(pre.scaler_name_)   # e.g. "standard"
 print(pre.reducer_name_)  # e.g. "variance_threshold"
+print(pre.n_features_in_, "→", pre.n_features_out_)
 ```
 
 The base class `ZeroShotPreprocessor(task="auto")` is also available when the task should be inferred from `y`.
@@ -67,6 +68,8 @@ A `PreprocessingProfile` is computed from a single pass (subsampled where noted)
 | `n_minority_class` | Minority class count for binary classification (0 for regression) |
 | `y_skewness`, `y_all_positive` | Target distribution stats (regression only) |
 
+Profile computation subsamples to at most 5 000 rows and 500 features to scale to large datasets.
+
 ### Stage 2 — Scaler selection (`scaler.py`)
 
 Rules are evaluated in order; first match wins:
@@ -80,48 +83,20 @@ Rules are evaluated in order; first match wins:
 | `median_feature_skewness > 1.5` | `PowerTransformer` (Yeo-Johnson) | Reduces heavy skew; handles negative values |
 | *(default)* | `StandardScaler` | Zero mean, unit variance; appropriate for approximately normal features |
 
+> **Fallback**: if `PowerTransformer` raises a scipy bracketing error during `fit`, the scaler is automatically downgraded to `RobustScaler`.
+
 ### Stage 3 — Reducer selection (`reducer.py`)
 
-Rules are calibrated for XGBoost and tree-based models (Grinsztajn et al. 2022, TabZilla 2023). All reducers are pure feature selectors — no matrix decomposition — keeping the ONNX graph compact.
+All reducers are pure feature selectors — no matrix decomposition — keeping the pipeline interpretable and the ONNX graph compact. Rules are calibrated for XGBoost and tree-based models.
 
-```
-p ≤ 50
-    → variance_threshold           (too few features to meaningfully reduce)
+| Condition | Reducer |
+|---|---|
+| `p ≤ 50` or `n/p ≥ 20` | `variance_threshold` — dataset is small enough that no further reduction is needed |
+| *(everything else)* | `correlation_filter` — removes redundant features by pairwise Pearson correlation |
 
-is_sparse_counts and p > 200
-    → select_k_mutual_info         (MI optimal for binary features; Rogers & Hahn 2010,
-                                    Guyon & Elisseeff 2003)
+**`variance_threshold`**: `VarianceThreshold(1e-6)` removes any remaining constant features (those with near-zero variance after imputation and scaling).
 
-n/p ≥ 20
-    → variance_threshold           (XGBoost internals sufficient; Harrell 2001)
-
-n/p ≥ 1
-    → select_80                    (light 20% drop; XGBoost handles this regime internally)
-
-n/p < 1  (p > n: overfitting risk even with tree regularization)
-    sparsity > 0.5  → select_k_mutual_info
-    else            → select_60    (keep 60%; conservative reduction for p > n dense data)
-```
-
-**EPV adjustment**: for binary classification, `n_eff = min(n_positives, n_negatives)` (minority class count) is used instead of `n_samples` when computing `k`. This reflects the EPV (Events Per Variable) rule — the number of features you can reliably learn from is bounded by the minority class, not total samples (Peduzzi et al. 1996). For regression, `n_eff = n_samples`.
-
-**Feature floor**: to avoid over-aggressive reduction, all selectors enforce:
-
-```
-min_features = max(50, n_eff // 2, p // 3)
-```
-
-This guarantees at least 50 features, at least half the effective sample count, and never more than a 67% reduction from the original feature count.
-
-**`select_k_mutual_info` k formula**:
-
-```
-k = max(p // 2, 2 * sqrt(n_eff))   # keep at least half; 2√n_eff is FDR-motivated
-k = min(k, 10 * n_eff)              # 10-EPV ceiling for very imbalanced data
-k = max(k, min_features)            # floor
-```
-
-Every selector prepends a `VarianceThreshold(1e-6)` sub-step to remove any remaining constant features before selection.
+**`correlation_filter`**: a sequential `[VarianceThreshold(1e-6) → CorrelationFilter(threshold=0.90)]` pipeline. `CorrelationFilter` iterates over features and removes any feature whose absolute Pearson correlation with a previously kept feature exceeds 0.90; when two features are correlated, the one with lower variance is dropped.
 
 ### Casistic summary
 
@@ -129,23 +104,35 @@ Every selector prepends a `VarianceThreshold(1e-6)` sub-step to remove any remai
 |---|---|---|
 | Dense, low-dimensional (p ≤ 50) | `standard` | `variance_threshold` |
 | Dense, well-determined (n/p ≥ 20) | `standard` or `robust` | `variance_threshold` |
-| Dense, n/p ≥ 1 | `standard` | `select_80` |
-| Dense, p > n | `standard` or `power` | `select_60` |
-| Sparse / fingerprint (ECFP, Morgan) | `max_abs` | `select_k_mutual_info` |
-| Sparse, p > n | `max_abs` | `select_k_mutual_info` |
+| Dense, underdetermined (p > n) | `standard` or `power` | `correlation_filter` |
+| Sparse / fingerprint (ECFP, Morgan) | `max_abs` | `variance_threshold` or `correlation_filter` |
 | Heavy outliers | `robust` | *(ratio-dependent)* |
 | Heavy skew, dense | `power` | *(ratio-dependent)* |
 
 ## Low-level API
 
 ```python
-from zspreprocessing import inspect
+from zspreprocessing import inspect, select_scaler, select_reducer, build_scaler, build_reducer
 
 profile = inspect(X, y, task="binary_classification")
 print(profile)
+
+scaler_name  = select_scaler(profile)   # e.g. "standard"
+reducer_name = select_reducer(profile)  # e.g. "correlation_filter"
+
+scaler  = build_scaler(scaler_name)
+reducer = build_reducer(reducer_name)
 ```
 
-`inspect()` returns a `PreprocessingProfile` without building any pipeline. Useful for exploring dataset characteristics or building custom logic on top.
+`inspect()` returns a `PreprocessingProfile` without building any pipeline. Useful for exploring dataset characteristics or building custom selection logic on top.
+
+## Command-line interface
+
+```bash
+python -m zspreprocessing data.csv --target <column> [--task auto|binary_classification|regression]
+```
+
+Reads a CSV file, profiles the dataset, and prints the `PreprocessingProfile` together with the recommended scaler and reducer name. No pipeline is built or fitted.
 
 ## ONNX export
 
@@ -157,7 +144,7 @@ sess = rt.InferenceSession("preprocessor.onnx")
 X_out = sess.run(None, {"float_input": X_test.astype("float32")})[0]
 ```
 
-Requires `pip install zspreprocessing[onnx]`. All reducers are skl2onnx-compatible.
+Requires `pip install zspreprocessing[onnx]`. The entire pipeline — including `CorrelationFilter` — is skl2onnx-compatible (target opset 15).
 
 ## About the Ersilia Open Source Initiative
 
