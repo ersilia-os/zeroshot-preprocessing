@@ -1,7 +1,7 @@
 """
 Tests for zspreprocessing.
 
-Structure mirrors test_zsxgboost.py:
+Structure:
   TestInspector          — dataset profiling
   TestScalerReducer      — selection rule unit tests
   TestFitTransform       — end-to-end pipeline tests
@@ -15,7 +15,9 @@ import scipy.sparse as sp
 
 from zspreprocessing import (
     PreprocessingProfile,
+    ZeroShotClassifierPreprocessor,
     ZeroShotPreprocessor,
+    ZeroShotRegressorPreprocessor,
     inspect,
     select_reducer,
     select_scaler,
@@ -57,9 +59,20 @@ def make_skewed_data(n=300, p=20, seed=0):
 def make_outlier_data(n=300, p=20, seed=0):
     rng = np.random.RandomState(seed)
     X = rng.randn(n, p)
-    # Inject outliers into all features
-    X[:10] *= 100
+    # Inject outliers into >5% of rows so outlier_fraction > 0.3
+    # The profiler flags a feature if >5% of its values fall outside 1.5×IQR,
+    # so we need at least ceil(n * 0.05) + 1 = 16 rows; use 20 to be safe.
+    X[:20] *= 100
     y = (rng.randn(n) > 0).astype(int)
+    return X, y
+
+
+def make_imbalanced_clf_data(n=1000, minority_count=10, p=20, seed=0):
+    """Binary classification with a heavily imbalanced target."""
+    rng = np.random.RandomState(seed)
+    X = rng.randn(n, p)
+    y = np.zeros(n, dtype=int)
+    y[:minority_count] = 1
     return X, y
 
 
@@ -80,6 +93,7 @@ def make_profile(**kwargs) -> PreprocessingProfile:
         task="binary_classification",
         y_skewness=0.0,
         y_all_positive=False,
+        n_minority_class=0,
     )
     defaults.update(kwargs)
     return PreprocessingProfile(**defaults)
@@ -107,6 +121,7 @@ class TestInspector:
         assert hasattr(p, "task")
         assert hasattr(p, "y_skewness")
         assert hasattr(p, "y_all_positive")
+        assert hasattr(p, "n_minority_class")
 
     def test_profile_fractions_in_range(self):
         X, y = make_clf_data()
@@ -172,6 +187,32 @@ class TestInspector:
         assert p.y_all_positive is True
         assert np.isfinite(p.y_skewness)
 
+    def test_regression_y_not_all_positive(self):
+        X, y = make_reg_data()
+        # y from randn includes negatives
+        p = inspect(X, y, task="regression")
+        assert p.y_all_positive is False
+
+    def test_n_minority_class_computed(self):
+        # 10 positives, 290 negatives
+        X, y = make_imbalanced_clf_data(n=300, minority_count=10, p=20)
+        p = inspect(X, y)
+        assert p.task == "binary_classification"
+        assert p.n_minority_class == 10
+
+    def test_large_dataset_profile(self):
+        # 100k samples, 2000 features — profiling must complete and fields be valid
+        rng = np.random.RandomState(0)
+        X = rng.randn(100_000, 2_000).astype(np.float32)
+        y = (rng.randn(100_000) > 0).astype(int)
+        p = inspect(X, y)
+        assert p.n_samples == 100_000
+        assert p.n_features == 2_000
+        assert 0.0 <= p.sparsity <= 1.0
+        assert 0.0 <= p.binary_feature_fraction <= 1.0
+        assert 0.0 <= p.outlier_fraction <= 1.0
+        assert p.n_p_ratio == pytest.approx(50.0)
+
     def test_repr(self):
         X, y = make_clf_data()
         p = inspect(X, y)
@@ -218,38 +259,42 @@ class TestScalerReducer:
         assert select_scaler(p) == "max_abs"
 
     # --- Reducer rules ---
+    # select_reducer only uses n_features and n_p_ratio.
 
     def test_reducer_few_features(self):
-        p = make_profile(n_features=30, n_p_ratio=10.0)
+        # p ≤ 50 → no reduction regardless of ratio
+        p = make_profile(n_features=30, n_p_ratio=1.0)
         assert select_reducer(p) == "variance_threshold"
 
-    def test_reducer_fingerprints(self):
-        p = make_profile(n_features=512, is_sparse_counts=True, n_p_ratio=3.0)
-        assert select_reducer(p) == "correlation_filter"
-
     def test_reducer_well_determined(self):
+        # n/p ≥ 20 → no reduction needed
         p = make_profile(n_features=100, n_p_ratio=25.0)
         assert select_reducer(p) == "variance_threshold"
 
-    def test_reducer_moderate_correlated(self):
-        p = make_profile(n_features=100, n_p_ratio=10.0, median_abs_correlation=0.7)
+    def test_reducer_intermediate_ratio(self):
+        # p > 50 and 1 ≤ n/p < 20 → correlation filter
+        p = make_profile(n_features=100, n_p_ratio=10.0)
         assert select_reducer(p) == "correlation_filter"
 
-    def test_reducer_moderate_independent(self):
-        p = make_profile(n_features=100, n_p_ratio=10.0, median_abs_correlation=0.2)
+    def test_reducer_underdetermined(self):
+        # p > n (n/p < 1) → correlation filter
+        p = make_profile(n_features=500, n_p_ratio=1.5)
         assert select_reducer(p) == "correlation_filter"
 
-    def test_reducer_underdetermined_sparse(self):
-        p = make_profile(n_features=500, n_p_ratio=1.5, sparsity=0.7)
+    def test_reducer_fingerprints(self):
+        # Large sparse fingerprint dataset with low n/p → correlation filter
+        p = make_profile(n_features=512, is_sparse_counts=True, n_p_ratio=3.0)
         assert select_reducer(p) == "correlation_filter"
 
-    def test_reducer_underdetermined_correlated(self):
-        p = make_profile(n_features=200, n_p_ratio=2.0, sparsity=0.0, median_abs_correlation=0.8)
+    def test_reducer_large_p_low_ratio(self):
+        # 2000 features, n/p = 0.5 → correlation filter
+        p = make_profile(n_features=2000, n_p_ratio=0.5)
         assert select_reducer(p) == "correlation_filter"
 
-    def test_reducer_underdetermined_independent(self):
-        p = make_profile(n_features=200, n_p_ratio=2.0, sparsity=0.0, median_abs_correlation=0.1)
-        assert select_reducer(p) == "correlation_filter"
+    def test_reducer_large_p_high_ratio(self):
+        # 2000 features, n/p = 50 → variance threshold (well-determined)
+        p = make_profile(n_features=2000, n_p_ratio=50.0)
+        assert select_reducer(p) == "variance_threshold"
 
 
 # ---------------------------------------------------------------------------
@@ -283,9 +328,9 @@ class TestFitTransform:
         assert pre.n_features_out_ >= 1
 
     def test_transform_consistency(self):
+        # fit_transform(X) must equal transform(X) after fit on the same data
         X, y = make_clf_data(n=200, p=20)
         pre = ZeroShotPreprocessor()
-        pre.fit(X, y)
         X_t1 = pre.fit_transform(X, y)
         X_t2 = pre.transform(X)
         np.testing.assert_allclose(X_t1, X_t2)
@@ -352,6 +397,55 @@ class TestFitTransform:
         pre = ZeroShotPreprocessor(task="auto")
         pre.fit(X, y)
         assert pre.profile_.task == "binary_classification"
+
+    def test_highly_imbalanced_classification(self):
+        # 990 negatives, 10 positives
+        X, y = make_imbalanced_clf_data(n=1000, minority_count=10, p=20)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+        assert pre.profile_.n_minority_class == 10
+        assert X_t.shape[0] == 1000
+        assert X_t.shape[1] >= 1
+
+    def test_large_dataset_fits(self):
+        # 100k samples, 2000 features — n/p=50 → variance_threshold reducer
+        rng = np.random.RandomState(0)
+        X = rng.randn(100_000, 2_000).astype(np.float32)
+        y = (rng.randn(100_000) > 0).astype(int)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+        assert pre.n_features_in_ == 2_000
+        assert pre.n_features_out_ >= 1
+        assert pre.reducer_name_ == "variance_threshold"
+        assert X_t.shape[0] == 100_000
+
+    def test_subclass_classifier_preprocessor(self):
+        X, y = make_clf_data()
+        pre = ZeroShotClassifierPreprocessor()
+        pre.fit(X, y)
+        assert pre.profile_.task == "binary_classification"
+        assert pre.task == "binary_classification"
+
+    def test_subclass_regressor_preprocessor(self):
+        X, y = make_reg_data()
+        pre = ZeroShotRegressorPreprocessor()
+        pre.fit(X, y)
+        assert pre.profile_.task == "regression"
+        assert pre.task == "regression"
+
+    def test_correlation_filter_reduces_features(self):
+        # Build data where half the features are exact copies of the other half
+        # so CorrelationFilter must drop ~50% of them.
+        rng = np.random.RandomState(0)
+        n, half_p = 200, 50
+        X_base = rng.randn(n, half_p)
+        X = np.hstack([X_base, X_base])  # 100 features, 50 duplicated pairs (r=1.0)
+        y = (rng.randn(n) > 0).astype(int)
+        # n=200, p=100, n/p=2.0 → "correlation_filter"
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        assert pre.reducer_name_ == "correlation_filter"
+        assert pre.n_features_out_ < pre.n_features_in_
 
 
 # ---------------------------------------------------------------------------

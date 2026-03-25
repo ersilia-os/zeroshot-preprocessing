@@ -8,7 +8,6 @@ simple and fully ONNX-exportable.
 
 from sklearn.preprocessing import (
     MaxAbsScaler,
-    MinMaxScaler,
     PowerTransformer,
     RobustScaler,
     StandardScaler,
@@ -49,7 +48,7 @@ def select_scaler(profile: PreprocessingProfile) -> str:
     Returns
     -------
     str
-        One of: "max_abs", "robust", "power", "standard", "minmax".
+        One of: "max_abs", "robust", "power", "standard".
     """
     # 1. Fingerprints
     if profile.is_sparse_counts:
@@ -80,7 +79,6 @@ _SCALER_FACTORIES = {
     "robust":   RobustScaler,
     "power":    lambda: PowerTransformer(method="yeo-johnson"),
     "max_abs":  MaxAbsScaler,
-    "minmax":   MinMaxScaler,
 }
 
 
@@ -91,7 +89,7 @@ def build_scaler(scaler_name: str):
     Parameters
     ----------
     scaler_name : str
-        Must be one of: "standard", "robust", "power", "max_abs", "minmax".
+        Must be one of: "standard", "robust", "power", "max_abs".
 
     Returns
     -------

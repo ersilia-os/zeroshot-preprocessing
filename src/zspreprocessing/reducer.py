@@ -94,10 +94,8 @@ def build_reducer(reducer_name: str, profile: PreprocessingProfile):
     -------
     sklearn transformer (Pipeline or single step)
     """
-    vt = VarianceThreshold(threshold=1e-6)
-
     if reducer_name == "variance_threshold":
-        return vt
+        return VarianceThreshold(threshold=1e-6)
 
     if reducer_name == "correlation_filter":
         return Pipeline([
