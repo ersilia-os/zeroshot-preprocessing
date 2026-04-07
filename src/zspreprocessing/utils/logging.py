@@ -75,8 +75,8 @@ class Logger:
             return
 
         task_label = {
-            "binary_classification": "Binary classification",
-            "regression":            "Regression",
+            "classification": "Classification",
+            "regression":     "Regression",
         }.get(profile.task, profile.task)
 
         parts = [

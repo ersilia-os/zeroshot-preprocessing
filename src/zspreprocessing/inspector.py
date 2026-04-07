@@ -6,8 +6,6 @@ dimensionality reducer without any search or cross-validation.
 """
 
 from dataclasses import dataclass
-from typing import Optional
-
 import numpy as np
 from scipy import stats
 
@@ -36,7 +34,7 @@ class PreprocessingProfile:
     feature_signal_p90: float          # 90th-percentile |Pearson r| with target
 
     # Task
-    task: str                          # "binary_classification" or "regression"
+    task: str                          # "classification" or "regression"
 
     # Target characteristics (regression)
     y_skewness: float = 0.0
@@ -60,7 +58,7 @@ class PreprocessingProfile:
         ]
         if self.task == "regression":
             lines.append(f"  y_skewness={self.y_skewness:.3f}, y_all_positive={self.y_all_positive}")
-        if self.task == "binary_classification":
+        if self.task == "classification":
             lines.append(f"  n_minority_class={self.n_minority_class}")
         lines.append(")")
         return "\n".join(lines)
@@ -154,14 +152,6 @@ def _estimate_feature_signal(X, y: np.ndarray, n_sample: int = 5000,
     return float(corrs.mean()), float(np.percentile(corrs, 90))
 
 
-def _detect_task(y: np.ndarray) -> str:
-    """Auto-detects task from y. Reused from zsxgboost."""
-    unique = np.unique(y)
-    if len(unique) == 2 and set(unique).issubset({0, 1}):
-        return "binary_classification"
-    return "regression"
-
-
 def _compute_median_feature_skewness(X, n_sample: int = 5000,
                                      p_sample: int = 200) -> float:
     """
@@ -180,6 +170,9 @@ def _compute_median_feature_skewness(X, n_sample: int = 5000,
     else:
         Xs = np.asarray(X)[np.ix_(row_idx, col_idx)].astype(float)
 
+    Xs = Xs[:, Xs.std(axis=0) > 0]
+    if Xs.shape[1] == 0:
+        return 0.0
     skews = np.abs(stats.skew(Xs, axis=0))
     skews = skews[np.isfinite(skews)]
     return float(np.median(skews)) if skews.size > 0 else 0.0
@@ -270,7 +263,7 @@ def _compute_median_abs_correlation(X, n_sample: int = 5000,
 # Public API
 # ---------------------------------------------------------------------------
 
-def inspect(X, y, task: Optional[str] = None) -> PreprocessingProfile:
+def inspect(X, y, task: str) -> PreprocessingProfile:
     """
     Profile the dataset and return a PreprocessingProfile.
 
@@ -278,8 +271,8 @@ def inspect(X, y, task: Optional[str] = None) -> PreprocessingProfile:
     ----------
     X : array-like or scipy sparse matrix, shape (n_samples, n_features)
     y : array-like, shape (n_samples,)
-    task : str or None
-        "binary_classification", "regression", or None for auto-detection.
+    task : str
+        "classification" or "regression".
 
     Returns
     -------
@@ -288,11 +281,9 @@ def inspect(X, y, task: Optional[str] = None) -> PreprocessingProfile:
     y = np.asarray(y).ravel()
     n_samples, n_features = X.shape
 
-    if task is None:
-        task = _detect_task(y)
-    if task not in ("binary_classification", "regression"):
+    if task not in ("classification", "regression"):
         raise ValueError(
-            f"task must be 'binary_classification' or 'regression', got {task!r}"
+            f"task must be 'classification' or 'regression', got {task!r}"
         )
 
     sparsity = _compute_sparsity(X)
@@ -312,7 +303,7 @@ def inspect(X, y, task: Optional[str] = None) -> PreprocessingProfile:
         y_all_positive = bool((y > 0).all())
 
     n_minority_class = 0
-    if task == "binary_classification":
+    if task == "classification":
         counts = np.bincount(y.astype(int))
         n_minority_class = int(counts.min())
 

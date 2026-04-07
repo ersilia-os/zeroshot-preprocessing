@@ -1,5 +1,5 @@
 """
-python -m zspreprocessing <csv_file> --target <column> [--task auto|binary_classification|regression]
+python -m zspreprocessing <csv_file> --target <column> [--task classification|regression]
 
 Print the PreprocessingProfile for a CSV dataset.
 """
@@ -17,9 +17,9 @@ def main():
     parser.add_argument("--target", required=True, help="Name of the target column")
     parser.add_argument(
         "--task",
-        default="auto",
-        choices=["auto", "binary_classification", "regression"],
-        help="Task type (default: auto)",
+        default="classification",
+        choices=["classification", "regression"],
+        help="Task type (default: classification)",
     )
     args = parser.parse_args()
 
@@ -45,8 +45,7 @@ def main():
 
     from zspreprocessing import inspect, select_reducer, select_scaler
 
-    task = None if args.task == "auto" else args.task
-    profile = inspect(X, y, task=task)
+    profile = inspect(X, y, task=args.task)
 
     print(repr(profile))
     print()

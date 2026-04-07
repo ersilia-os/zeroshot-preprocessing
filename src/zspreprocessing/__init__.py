@@ -2,7 +2,7 @@
 zspreprocessing — Zero-shot scikit-learn preprocessing pipeline selection.
 
 Automatically selects imputation, scaling, and dimensionality reduction
-strategies for binary classification and regression tasks based on
+strategies for classification and regression tasks based on
 lightweight dataset profiling — no hyperparameter search required.
 
 Public API
@@ -10,12 +10,12 @@ Public API
 inspect(X, y, task=None) -> PreprocessingProfile
     Profile a dataset and return its preprocessing characteristics.
 
-ZeroShotPreprocessor(task="auto", verbose=False)
+ZeroShotPreprocessor(task="classification", verbose=False)
     Sklearn-compatible transformer with automatically selected preprocessing.
     Exports to ONNX via ``to_onnx(path)``.
 
 ZeroShotClassifierPreprocessor(verbose=False)
-    Convenience subclass fixed to binary_classification task.
+    Convenience subclass fixed to classification task.
 
 ZeroShotRegressorPreprocessor(verbose=False)
     Convenience subclass fixed to regression task.
@@ -43,6 +43,7 @@ from .pipeline import (
     ZeroShotPreprocessor,
     ZeroShotClassifierPreprocessor,
     ZeroShotRegressorPreprocessor,
+    PreprocessorArtifact,
 )
 from .reducer import build_reducer, select_reducer
 from .scaler import build_scaler, select_scaler
@@ -53,6 +54,7 @@ __all__ = [
     "ZeroShotPreprocessor",
     "ZeroShotClassifierPreprocessor",
     "ZeroShotRegressorPreprocessor",
+    "PreprocessorArtifact",
     "select_scaler",
     "build_scaler",
     "select_reducer",

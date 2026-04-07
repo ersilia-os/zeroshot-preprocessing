@@ -8,6 +8,7 @@ Structure:
 """
 
 import importlib
+import os
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ import scipy.sparse as sp
 
 from zspreprocessing import (
     PreprocessingProfile,
+    PreprocessorArtifact,
     ZeroShotClassifierPreprocessor,
     ZeroShotPreprocessor,
     ZeroShotRegressorPreprocessor,
@@ -90,7 +92,7 @@ def make_profile(**kwargs) -> PreprocessingProfile:
         near_zero_variance_fraction=0.0,
         median_abs_correlation=0.2,
         feature_signal_p90=0.2,
-        task="binary_classification",
+        task="classification",
         y_skewness=0.0,
         y_all_positive=False,
         n_minority_class=0,
@@ -106,7 +108,7 @@ def make_profile(**kwargs) -> PreprocessingProfile:
 class TestInspector:
     def test_profile_fields_present(self):
         X, y = make_clf_data()
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert hasattr(p, "n_samples")
         assert hasattr(p, "n_features")
         assert hasattr(p, "n_p_ratio")
@@ -125,7 +127,7 @@ class TestInspector:
 
     def test_profile_fractions_in_range(self):
         X, y = make_clf_data()
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert 0.0 <= p.sparsity <= 1.0
         assert 0.0 <= p.binary_feature_fraction <= 1.0
         assert 0.0 <= p.outlier_fraction <= 1.0
@@ -134,20 +136,10 @@ class TestInspector:
         assert 0.0 <= p.feature_signal_p90 <= 1.0
         assert p.n_p_ratio > 0
 
-    def test_task_auto_classification(self):
-        X, y = make_clf_data()
-        p = inspect(X, y)
-        assert p.task == "binary_classification"
-
-    def test_task_auto_regression(self):
-        X, y = make_reg_data()
-        p = inspect(X, y)
-        assert p.task == "regression"
-
     def test_task_explicit(self):
         X, y = make_clf_data()
-        p = inspect(X, y, task="binary_classification")
-        assert p.task == "binary_classification"
+        p = inspect(X, y, task="classification")
+        assert p.task == "classification"
 
     def test_task_invalid(self):
         X, y = make_clf_data()
@@ -156,12 +148,12 @@ class TestInspector:
 
     def test_sparse_counts_detected(self):
         X, y = make_fingerprint_data()
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert p.is_sparse_counts is True
 
     def test_sparse_counts_not_detected_for_dense(self):
         X, y = make_clf_data()
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert p.is_sparse_counts is False
 
     def test_near_zero_variance_detected(self):
@@ -169,13 +161,13 @@ class TestInspector:
         X = rng.randn(200, 20)
         X[:, :5] = 0.0  # 25% constant features
         y = (rng.randn(200) > 0).astype(int)
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert p.near_zero_variance_fraction > 0.1
 
     def test_sparse_scipy_input(self):
         X_dense, y = make_fingerprint_data()
         X_sparse = sp.csr_matrix(X_dense)
-        p = inspect(X_sparse, y)
+        p = inspect(X_sparse, y, task="classification")
         assert p.n_samples == X_dense.shape[0]
         assert p.n_features == X_dense.shape[1]
         assert p.sparsity > 0.5
@@ -196,8 +188,8 @@ class TestInspector:
     def test_n_minority_class_computed(self):
         # 10 positives, 290 negatives
         X, y = make_imbalanced_clf_data(n=300, minority_count=10, p=20)
-        p = inspect(X, y)
-        assert p.task == "binary_classification"
+        p = inspect(X, y, task="classification")
+        assert p.task == "classification"
         assert p.n_minority_class == 10
 
     def test_large_dataset_profile(self):
@@ -205,7 +197,7 @@ class TestInspector:
         rng = np.random.RandomState(0)
         X = rng.randn(100_000, 2_000).astype(np.float32)
         y = (rng.randn(100_000) > 0).astype(int)
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         assert p.n_samples == 100_000
         assert p.n_features == 2_000
         assert 0.0 <= p.sparsity <= 1.0
@@ -215,7 +207,7 @@ class TestInspector:
 
     def test_repr(self):
         X, y = make_clf_data()
-        p = inspect(X, y)
+        p = inspect(X, y, task="classification")
         r = repr(p)
         assert "PreprocessingProfile" in r
         assert "n_samples" in r
@@ -392,12 +384,6 @@ class TestFitTransform:
         assert X_t.shape[0] == 50
         assert X_t.shape[1] <= 300
 
-    def test_auto_task_detection(self):
-        X, y = make_clf_data()
-        pre = ZeroShotPreprocessor(task="auto")
-        pre.fit(X, y)
-        assert pre.profile_.task == "binary_classification"
-
     def test_highly_imbalanced_classification(self):
         # 990 negatives, 10 positives
         X, y = make_imbalanced_clf_data(n=1000, minority_count=10, p=20)
@@ -423,8 +409,8 @@ class TestFitTransform:
         X, y = make_clf_data()
         pre = ZeroShotClassifierPreprocessor()
         pre.fit(X, y)
-        assert pre.profile_.task == "binary_classification"
-        assert pre.task == "binary_classification"
+        assert pre.profile_.task == "classification"
+        assert pre.task == "classification"
 
     def test_subclass_regressor_preprocessor(self):
         X, y = make_reg_data()
@@ -449,46 +435,482 @@ class TestFitTransform:
 
 
 # ---------------------------------------------------------------------------
+# TestSave
+# ---------------------------------------------------------------------------
+
+class TestSave:
+
+    def _check_metadata(self, directory, pre):
+        import json
+        json_path = os.path.join(directory, "preprocessor.json")
+        assert os.path.exists(json_path), f"{json_path} missing"
+        with open(json_path) as f:
+            meta = json.load(f)
+        assert meta["task"] == pre.task
+        assert meta["scaler"] == pre.scaler_name_
+        assert meta["reducer"] == pre.reducer_name_
+        assert meta["n_features_in"] == pre.n_features_in_
+        assert meta["n_features_out"] == pre.n_features_out_
+        assert isinstance(meta["kept_feature_indices"], list)
+        assert len(meta["kept_feature_indices"]) == pre.n_features_out_
+        assert all(0 <= i < pre.n_features_in_ for i in meta["kept_feature_indices"])
+        assert len(set(meta["kept_feature_indices"])) == len(meta["kept_feature_indices"])
+        return meta
+
+    # --- ONNX saves ---
+
+    def test_save_onnx_classification(self, tmp_path):
+        import onnxruntime as rt
+        X, y = make_clf_data(n=300, p=80)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+
+        pre.save(str(tmp_path), onnx=True)
+
+        assert os.path.exists(str(tmp_path / "preprocessor.onnx"))
+        assert os.path.exists(str(tmp_path / "preprocessor.json"))
+        self._check_metadata(str(tmp_path), pre)
+
+        sess = rt.InferenceSession(str(tmp_path / "preprocessor.onnx"))
+        X_onnx = sess.run(None, {"float_input": X.astype(np.float32)})[0]
+        np.testing.assert_allclose(X_t.astype(np.float32), X_onnx, rtol=1e-4, atol=1e-5)
+
+    def test_save_onnx_regression(self, tmp_path):
+        import onnxruntime as rt
+        X, y = make_reg_data(n=300, p=20)
+        pre = ZeroShotPreprocessor(task="regression")
+        X_t = pre.fit_transform(X, y)
+
+        pre.save(str(tmp_path), onnx=True)
+
+        self._check_metadata(str(tmp_path), pre)
+        sess = rt.InferenceSession(str(tmp_path / "preprocessor.onnx"))
+        X_onnx = sess.run(None, {"float_input": X.astype(np.float32)})[0]
+        np.testing.assert_allclose(X_t.astype(np.float32), X_onnx, rtol=1e-4, atol=1e-5)
+
+    # --- joblib saves ---
+
+    def test_save_joblib_classification(self, tmp_path):
+        import joblib
+        X, y = make_clf_data(n=300, p=80)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+
+        pre.save(str(tmp_path), onnx=False)
+
+        assert os.path.exists(str(tmp_path / "preprocessor.joblib"))
+        assert os.path.exists(str(tmp_path / "preprocessor.json"))
+        self._check_metadata(str(tmp_path), pre)
+
+        pipeline = joblib.load(str(tmp_path / "preprocessor.joblib"))
+        np.testing.assert_allclose(X_t, pipeline.transform(X))
+
+    def test_save_joblib_regression(self, tmp_path):
+        import joblib
+        X, y = make_reg_data(n=300, p=20)
+        pre = ZeroShotPreprocessor(task="regression")
+        X_t = pre.fit_transform(X, y)
+
+        pre.save(str(tmp_path), onnx=False)
+
+        self._check_metadata(str(tmp_path), pre)
+        pipeline = joblib.load(str(tmp_path / "preprocessor.joblib"))
+        np.testing.assert_allclose(X_t, pipeline.transform(X))
+
+    # --- Metadata correctness ---
+
+    def test_kept_indices_variance_threshold(self, tmp_path):
+        rng = np.random.RandomState(0)
+        X = rng.randn(300, 20)
+        X[:, 3] = 0.0
+        X[:, 7] = 0.0
+        y = (rng.randn(300) > 0).astype(int)
+
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        assert pre.reducer_name_ == "variance_threshold"
+
+        kept = pre.kept_feature_indices_
+        assert 3 not in kept
+        assert 7 not in kept
+        assert len(kept) == pre.n_features_out_
+
+    def test_kept_indices_correlation_filter(self, tmp_path):
+        rng = np.random.RandomState(0)
+        n, half_p = 200, 50
+        X_base = rng.randn(n, half_p)
+        X = np.hstack([X_base, X_base])
+        y = (rng.randn(n) > 0).astype(int)
+
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        assert pre.reducer_name_ == "correlation_filter"
+
+        kept = pre.kept_feature_indices_
+        assert len(kept) == pre.n_features_out_
+        assert len(kept) < 100
+
+    def test_kept_indices_count_matches_n_features_out(self, tmp_path):
+        X, y = make_fingerprint_data(n=300, p=256)
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        assert len(pre.kept_feature_indices_) == pre.n_features_out_
+
+    def test_save_creates_directory(self, tmp_path):
+        X, y = make_clf_data()
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        directory = str(tmp_path / "new" / "nested" / "dir")
+        pre.save(directory, onnx=False)
+        assert os.path.exists(os.path.join(directory, "preprocessor.json"))
+
+    def test_kept_indices_all_nan_column(self, tmp_path):
+        rng = np.random.RandomState(0)
+        X = rng.randn(300, 20)
+        X[:, 5] = np.nan
+        y = (rng.randn(300) > 0).astype(int)
+
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+
+        assert 5 not in pre.kept_feature_indices_
+        assert len(pre.kept_feature_indices_) == pre.n_features_out_
+
+    def test_save_before_fit_raises(self, tmp_path):
+        from sklearn.exceptions import NotFittedError
+        pre = ZeroShotPreprocessor()
+        with pytest.raises(NotFittedError):
+            pre.save(str(tmp_path), onnx=False)
+
+
+# ---------------------------------------------------------------------------
+# TestPreprocessorArtifact
+# ---------------------------------------------------------------------------
+
+class TestPreprocessorArtifact:
+
+    def test_load_onnx_and_run(self, tmp_path):
+        X, y = make_clf_data(n=300, p=80)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+        pre.save(str(tmp_path), onnx=True)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        X_out = artifact.run(X)
+
+        assert isinstance(X_out, np.ndarray)
+        np.testing.assert_allclose(X_t.astype(np.float32), X_out, rtol=1e-4, atol=1e-5)
+
+    def test_load_joblib_and_run(self, tmp_path):
+        X, y = make_clf_data(n=300, p=80)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X, y)
+        pre.save(str(tmp_path), onnx=False)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        X_out = artifact.run(X)
+
+        np.testing.assert_allclose(X_t, X_out)
+
+    def test_metadata_attributes(self, tmp_path):
+        X, y = make_clf_data(n=300, p=80)
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        pre.save(str(tmp_path), onnx=True)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+
+        assert artifact.task == pre.task
+        assert artifact.scaler == pre.scaler_name_
+        assert artifact.reducer == pre.reducer_name_
+        assert artifact.n_features_in == pre.n_features_in_
+        assert artifact.n_features_out == pre.n_features_out_
+        assert artifact.kept_feature_indices == pre.kept_feature_indices_
+
+    def test_prefers_onnx_when_both_present(self, tmp_path):
+        X, y = make_clf_data()
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        pre.save(str(tmp_path), onnx=True)
+        pre.save(str(tmp_path), onnx=False)  # also write joblib
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        assert artifact._backend == "onnx"
+
+    def test_output_shape(self, tmp_path):
+        X, y = make_reg_data(n=200, p=20)
+        pre = ZeroShotPreprocessor(task="regression")
+        pre.fit(X, y)
+        pre.save(str(tmp_path), onnx=True)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        X_out = artifact.run(X)
+
+        assert X_out.shape == (200, pre.n_features_out_)
+
+    def test_sparse_input(self, tmp_path):
+        X_dense, y = make_fingerprint_data(n=200, p=256)
+        X_sparse = sp.csr_matrix(X_dense)
+        pre = ZeroShotPreprocessor()
+        X_t = pre.fit_transform(X_sparse, y)
+        pre.save(str(tmp_path), onnx=True)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        X_out = artifact.run(X_sparse)
+
+        X_t_dense = X_t.toarray() if hasattr(X_t, "toarray") else X_t
+        np.testing.assert_allclose(X_t_dense.astype(np.float32), X_out, rtol=1e-4, atol=1e-5)
+
+    def test_missing_json_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="preprocessor.json"):
+            PreprocessorArtifact.load(str(tmp_path))
+
+    def test_missing_model_raises(self, tmp_path):
+        # Write only the JSON, no model file
+        import json
+        with open(str(tmp_path / "preprocessor.json"), "w") as f:
+            json.dump({"task": "classification", "scaler": "standard",
+                       "reducer": "variance_threshold", "n_features_in": 10,
+                       "n_features_out": 10, "kept_feature_indices": list(range(10))}, f)
+        with pytest.raises(FileNotFoundError, match="preprocessor.onnx or preprocessor.joblib"):
+            PreprocessorArtifact.load(str(tmp_path))
+
+    def test_repr(self, tmp_path):
+        X, y = make_clf_data()
+        pre = ZeroShotPreprocessor()
+        pre.fit(X, y)
+        pre.save(str(tmp_path), onnx=True)
+
+        artifact = PreprocessorArtifact.load(str(tmp_path))
+        r = repr(artifact)
+        assert "PreprocessorArtifact" in r
+        assert "onnx" in r
+
+
+# ---------------------------------------------------------------------------
 # TestONNX
 # ---------------------------------------------------------------------------
 
 onnx_available = importlib.util.find_spec("skl2onnx") is not None
+if onnx_available:
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        onnx_available = False
 
 
-@pytest.mark.skipif(not onnx_available, reason="skl2onnx not installed")
+def _onnx_roundtrip(pre, X, tmp_path, filename="preprocessor.onnx"):
+    """Fit, export to ONNX, run inference, return (sklearn_out, onnx_out)."""
+    import onnxruntime as rt
+
+    X_t = pre.fit_transform(X, pre._last_y) if hasattr(pre, "_last_y") else None
+    onnx_path = str(tmp_path / filename)
+    pre.to_onnx(onnx_path)
+    sess = rt.InferenceSession(onnx_path)
+    input_name = sess.get_inputs()[0].name
+    X_onnx = sess.run(None, {input_name: X.astype(np.float32)})[0]
+    return X_t, X_onnx
+
+
+def _fit_export_check(X, y, task, tmp_path, filename="pre.onnx", atol=1e-5, rtol=1e-4):
+    """Full fit → export → onnx inference → numerical check helper."""
+    import onnxruntime as rt
+
+    pre = ZeroShotPreprocessor(task=task)
+    X_t = pre.fit_transform(X, y)
+
+    onnx_path = str(tmp_path / filename)
+    pre.to_onnx(onnx_path)
+
+    sess = rt.InferenceSession(onnx_path)
+    input_name = sess.get_inputs()[0].name
+
+    if hasattr(X, "toarray"):
+        X_dense = X.toarray()
+    else:
+        X_dense = np.asarray(X)
+
+    X_onnx = sess.run(None, {input_name: X_dense.astype(np.float32)})[0]
+
+    X_t_dense = X_t.toarray() if hasattr(X_t, "toarray") else X_t
+    assert X_onnx.shape == X_t_dense.shape, (
+        f"Shape mismatch: sklearn={X_t_dense.shape}, onnx={X_onnx.shape}"
+    )
+    np.testing.assert_allclose(
+        X_t_dense.astype(np.float32), X_onnx, rtol=rtol, atol=atol,
+        err_msg=f"scaler={pre.scaler_name_} reducer={pre.reducer_name_}"
+    )
+    return pre
+
+
+@pytest.mark.skipif(not onnx_available, reason="skl2onnx or onnxruntime not available")
 class TestONNX:
 
-    def test_onnx_export_and_load(self, tmp_path):
+    # ------------------------------------------------------------------
+    # Scaler × Reducer matrix (classification)
+    # ------------------------------------------------------------------
+
+    def test_standard_variance_threshold(self, tmp_path):
+        # StandardScaler + VarianceThreshold: normal dense, well-determined
+        rng = np.random.RandomState(0)
+        X = rng.randn(400, 20)          # p=20 ≤ 50 → variance_threshold
+        y = (rng.randn(400) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "std_vt.onnx")
+        assert pre.scaler_name_ == "standard"
+        assert pre.reducer_name_ == "variance_threshold"
+
+    def test_standard_correlation_filter(self, tmp_path):
+        # StandardScaler + CorrelationFilter: normal dense, high-dimensional
+        rng = np.random.RandomState(1)
+        X = rng.randn(100, 200)         # n/p=0.5 → correlation_filter
+        y = (rng.randn(100) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "std_cf.onnx")
+        assert pre.scaler_name_ == "standard"
+        assert pre.reducer_name_ == "correlation_filter"
+
+    def test_robust_variance_threshold(self, tmp_path):
+        # RobustScaler + VarianceThreshold: heavy outliers, few features
+        rng = np.random.RandomState(2)
+        X = rng.randn(400, 20)
+        X[:40] *= 100                   # >30% outlier features
+        y = (rng.randn(400) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "rob_vt.onnx")
+        assert pre.scaler_name_ == "robust"
+        assert pre.reducer_name_ == "variance_threshold"
+
+    def test_robust_correlation_filter(self, tmp_path):
+        # RobustScaler + CorrelationFilter: heavy outliers, high-dimensional
+        rng = np.random.RandomState(3)
+        X = rng.randn(100, 200)
+        X[:40] *= 100
+        y = (rng.randn(100) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "rob_cf.onnx")
+        assert pre.scaler_name_ == "robust"
+        assert pre.reducer_name_ == "correlation_filter"
+
+    def test_power_variance_threshold(self, tmp_path):
+        # PowerTransformer + VarianceThreshold: skewed, few features
+        rng = np.random.RandomState(4)
+        X = rng.exponential(scale=2.0, size=(400, 20)) ** 2   # heavy skew
+        y = (rng.randn(400) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "pow_vt.onnx")
+        assert pre.scaler_name_ in ("power", "robust")  # fallback allowed
+        assert pre.reducer_name_ == "variance_threshold"
+
+    def test_power_correlation_filter(self, tmp_path):
+        # PowerTransformer + CorrelationFilter: skewed, high-dimensional
+        rng = np.random.RandomState(5)
+        X = rng.exponential(scale=2.0, size=(100, 200)) ** 2
+        y = (rng.randn(100) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "pow_cf.onnx")
+        assert pre.scaler_name_ in ("power", "robust")
+        assert pre.reducer_name_ == "correlation_filter"
+
+    def test_maxabs_variance_threshold(self, tmp_path):
+        # MaxAbsScaler + VarianceThreshold: binary fingerprints, few features
+        rng = np.random.RandomState(6)
+        X = rng.randint(0, 2, (400, 30)).astype(float)   # binary, p≤50
+        y = (rng.randn(400) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "mabs_vt.onnx")
+        assert pre.scaler_name_ == "max_abs"
+        assert pre.reducer_name_ == "variance_threshold"
+
+    def test_maxabs_correlation_filter(self, tmp_path):
+        # MaxAbsScaler + CorrelationFilter: sparse fingerprint, high-dim
+        rng = np.random.RandomState(7)
+        X = (rng.random((200, 512)) < 0.05).astype(float)  # ~5% dense, p>50
+        y = (rng.randn(200) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "mabs_cf.onnx")
+        assert pre.scaler_name_ == "max_abs"
+        assert pre.reducer_name_ == "correlation_filter"
+
+    # ------------------------------------------------------------------
+    # Regression variants
+    # ------------------------------------------------------------------
+
+    def test_regression_standard_variance_threshold(self, tmp_path):
+        rng = np.random.RandomState(10)
+        X = rng.randn(400, 20)
+        y = rng.randn(400)
+        pre = _fit_export_check(X, y, "regression", tmp_path, "reg_std_vt.onnx")
+        assert pre.scaler_name_ == "standard"
+        assert pre.reducer_name_ == "variance_threshold"
+
+    def test_regression_robust_correlation_filter(self, tmp_path):
+        rng = np.random.RandomState(11)
+        X = rng.randn(100, 200)
+        X[:40] *= 100
+        y = rng.randn(100)
+        pre = _fit_export_check(X, y, "regression", tmp_path, "reg_rob_cf.onnx")
+        assert pre.scaler_name_ == "robust"
+        assert pre.reducer_name_ == "correlation_filter"
+
+    def test_regression_power_variance_threshold(self, tmp_path):
+        rng = np.random.RandomState(12)
+        X = rng.exponential(scale=2.0, size=(400, 20)) ** 2
+        y = rng.randn(400)
+        pre = _fit_export_check(X, y, "regression", tmp_path, "reg_pow_vt.onnx")
+        assert pre.scaler_name_ in ("power", "robust")
+        assert pre.reducer_name_ == "variance_threshold"
+
+    # ------------------------------------------------------------------
+    # Sparse scipy input
+    # ------------------------------------------------------------------
+
+    def test_sparse_input(self, tmp_path):
+        # scipy.sparse CSR → ONNX round-trip
+        X_dense, y = make_fingerprint_data(n=300, p=256)
+        X_sparse = sp.csr_matrix(X_dense)
+        pre = _fit_export_check(X_sparse, y, "classification", tmp_path, "sparse.onnx")
+        assert pre.scaler_name_ == "max_abs"
+
+    # ------------------------------------------------------------------
+    # Edge cases
+    # ------------------------------------------------------------------
+
+    def test_with_missing_values(self, tmp_path):
+        # NaNs are handled by the imputer; ONNX receives clean input
+        rng = np.random.RandomState(20)
+        X = rng.randn(300, 20)
+        X[rng.random(X.shape) < 0.1] = np.nan
+        y = (rng.randn(300) > 0).astype(int)
+        _fit_export_check(X, y, "classification", tmp_path, "nan.onnx")
+
+    def test_with_constant_columns(self, tmp_path):
+        # Constant columns are removed by VarianceThreshold; ONNX sees fewer features
+        rng = np.random.RandomState(21)
+        X = rng.randn(300, 25)
+        X[:, 0] = 7.0
+        X[:, 1] = -3.0
+        y = (rng.randn(300) > 0).astype(int)
+        pre = _fit_export_check(X, y, "classification", tmp_path, "const.onnx")
+        assert pre.n_features_out_ < 25
+
+    def test_transform_new_data(self, tmp_path):
+        # ONNX inference on held-out test set matches sklearn transform
         import onnxruntime as rt
 
-        X, y = make_clf_data(n=200, p=20)
+        rng = np.random.RandomState(30)
+        X_train = rng.randn(300, 80)
+        y_train = (rng.randn(300) > 0).astype(int)
+        X_test  = rng.randn(50, 80)
+
         pre = ZeroShotPreprocessor()
-        X_t = pre.fit_transform(X, y)
+        pre.fit(X_train, y_train)
+        X_test_sk = pre.transform(X_test)
 
-        onnx_path = str(tmp_path / "preprocessor.onnx")
+        onnx_path = str(tmp_path / "new_data.onnx")
         pre.to_onnx(onnx_path)
-
         sess = rt.InferenceSession(onnx_path)
         input_name = sess.get_inputs()[0].name
-        X_onnx = sess.run(None, {input_name: X.astype(np.float32)})[0]
+        X_test_onnx = sess.run(None, {input_name: X_test.astype(np.float32)})[0]
 
         np.testing.assert_allclose(
-            X_t.astype(np.float32), X_onnx, rtol=1e-4, atol=1e-5
+            X_test_sk.astype(np.float32), X_test_onnx, rtol=1e-4, atol=1e-5
         )
 
-    def test_onnx_output_shape(self, tmp_path):
-        import onnxruntime as rt
-
-        X, y = make_reg_data(n=300, p=30)
-        pre = ZeroShotPreprocessor(task="regression")
-        pre.fit(X, y)
-
-        onnx_path = str(tmp_path / "reg_preprocessor.onnx")
-        pre.to_onnx(onnx_path)
-
-        sess = rt.InferenceSession(onnx_path)
-        input_name = sess.get_inputs()[0].name
-        X_onnx = sess.run(None, {input_name: X.astype(np.float32)})[0]
-
-        assert X_onnx.shape[0] == X.shape[0]
-        assert X_onnx.shape[1] == pre.n_features_out_
+    def test_export_before_fit_raises(self, tmp_path):
+        from sklearn.exceptions import NotFittedError
+        pre = ZeroShotPreprocessor()
+        with pytest.raises(NotFittedError):
+            pre.to_onnx(str(tmp_path / "unfitted.onnx"))
