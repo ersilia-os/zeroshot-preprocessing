@@ -37,10 +37,10 @@ X_test_t  = pre.transform(X_test)
 ### Save to disk
 
 ```python
-pre.save("my_preprocessor/")
+pre.save("my_model/")
 # writes:
-#   my_preprocessor/preprocessor.onnx
-#   my_preprocessor/preprocessor.json
+#   my_model/preprocessor.onnx
+#   my_model/preprocessor.json
 ```
 
 `preprocessor.json` contains the selected operations and the indices of the original columns that survive the pipeline.
@@ -50,7 +50,7 @@ pre.save("my_preprocessor/")
 ```python
 from zspreprocessing import PreprocessorArtifact
 
-artifact = PreprocessorArtifact.load("my_preprocessor/")
+artifact = PreprocessorArtifact.load("my_model/")
 X_out = artifact.run(X_test)
 ```
 
