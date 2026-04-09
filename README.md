@@ -1,3 +1,5 @@
+**THIS REPOSITORY HAS BEEN ARCHIVED AND INCORPORATED INTO [LAZY-QSAR](https://github.com/ersilia-os/lazy-qsar)**
+
 # Zero-shot preprocessing for Ersilia's ML tasks
 
 Automatic preprocessing pipeline selection for scikit-learn. Picks a scaler and feature reducer from a single pass over your dataset — no cross-validation, no grid search.
